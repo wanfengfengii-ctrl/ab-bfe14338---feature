@@ -1,5 +1,6 @@
 import type {
   AuditModel,
+  DelayCandidate,
   Issue,
   NormalizedModel,
   Observation,
@@ -187,6 +188,8 @@ export function validateModel(raw: unknown): ValidationResult {
     error('observations', `观测数量至多 256（当前 ${rawObs.length}）`);
   }
   const eventById = new Map(events.map((e) => [e.id, e]));
+  /** 声明了至少一个候选档位的观测数（至多 18） */
+  let candidateObsCount = 0;
 
   rawObs.forEach((item, i) => {
     const p = `observations[${i}]`;
@@ -229,6 +232,69 @@ export function validateModel(raw: unknown): ValidationResult {
       error(`${p}.minDelay`, '延迟下界不能大于上界');
     }
 
+    // ---------- 候选延迟档位 ----------
+    let candidates: DelayCandidate[] | undefined;
+    if (o.candidates !== undefined) {
+      if (!Array.isArray(o.candidates)) {
+        error(`${p}.candidates`, '候选档位必须是数组');
+      } else if (o.candidates.length === 0) {
+        error(`${p}.candidates`, '候选档位至少 1 个；若不参与校正请省略该字段');
+      } else if (o.candidates.length > 3) {
+        error(`${p}.candidates`, `每条观测至多声明 3 个候选档位（当前 ${o.candidates.length}）`);
+      } else {
+        const parsed: DelayCandidate[] = [];
+        const candIds = new Set<string>();
+        let anyCandOk = false;
+        o.candidates.forEach((c, ci) => {
+          const cp = `${p}.candidates[${ci}]`;
+          if (!isObject(c)) {
+            error(cp, '候选档位必须是对象');
+            return;
+          }
+          let candOk = true;
+          if (!isNonEmptyString(c.id)) {
+            error(`${cp}.id`, '档位编号必须是非空字符串');
+            candOk = false;
+          } else if (candIds.has(c.id)) {
+            error(`${cp}.id`, `档位编号在该观测内重复："${c.id}"`);
+            candOk = false;
+          } else {
+            candIds.add(c.id);
+          }
+          const cminOk = isIntInRange(c.minDelay, 0, LIMIT);
+          if (!cminOk) {
+            error(`${cp}.minDelay`, `必须是 0 到 ${LIMIT} 之间的整数（延迟非负）`);
+            candOk = false;
+          }
+          const cmaxOk = isIntInRange(c.maxDelay, 0, LIMIT);
+          if (!cmaxOk) {
+            error(`${cp}.maxDelay`, `必须是 0 到 ${LIMIT} 之间的整数（延迟非负）`);
+            candOk = false;
+          }
+          if (cminOk && cmaxOk && (c.minDelay as number) > (c.maxDelay as number)) {
+            error(`${cp}.minDelay`, '延迟下界不能大于上界');
+            candOk = false;
+          }
+          const costOk = isIntInRange(c.cost, 1, 1_000_000);
+          if (!costOk) {
+            error(`${cp}.cost`, '校正代价必须是 1 到 1000000 之间的整数');
+            candOk = false;
+          }
+          if (candOk) {
+            parsed.push({
+              id: c.id as string,
+              minDelay: c.minDelay as number,
+              maxDelay: c.maxDelay as number,
+              cost: c.cost as number,
+            });
+            anyCandOk = true;
+          }
+        });
+        if (parsed.length > 0) candidates = parsed;
+        if (anyCandOk) candidateObsCount++;
+      }
+    }
+
     if (id && send && recv && dminOk && dmaxOk) {
       observations.push({
         id,
@@ -236,9 +302,14 @@ export function validateModel(raw: unknown): ValidationResult {
         receiveEvent: recv.id,
         minDelay: o.minDelay as number,
         maxDelay: o.maxDelay as number,
+        ...(candidates ? { candidates } : {}),
       });
     }
   });
+
+  if (candidateObsCount > 18) {
+    error('observations', `声明候选档位的观测至多 18 条（当前 ${candidateObsCount} 条）`);
+  }
 
   // ---------- 警告（不阻断裁决） ----------
   if (issues.every((x) => x.level !== 'error')) {

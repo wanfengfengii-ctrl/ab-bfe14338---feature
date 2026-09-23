@@ -5,6 +5,8 @@ interface Props {
   ranges: RecorderRange[];
   /** 点选端点对应的记录器（用于高亮） */
   focusRecorderId?: string;
+  /** 见证来源：原裁决 / 校正后 */
+  sourceLabel?: string;
   onClose: () => void;
 }
 
@@ -14,7 +16,7 @@ const fmt = (n: number) => n.toLocaleString('en-US');
  * 端点详情：列出该完整可行赋值下的全部偏移，以及每条观测的
  * 发送/接收真实时刻与实际延迟，供逐项核对是否落在给定闭区间内。
  */
-export function WitnessPanel({ witness, ranges, focusRecorderId, onClose }: Props) {
+export function WitnessPanel({ witness, ranges, focusRecorderId, sourceLabel, onClose }: Props) {
   const title =
     witness.endpoint === 'min' ? '全体最小端点完整可行赋值' : '全体最大端点完整可行赋值';
   const subtitle =
@@ -27,7 +29,10 @@ export function WitnessPanel({ witness, ranges, focusRecorderId, onClose }: Prop
       <div className="witness-modal" onClick={(e) => e.stopPropagation()}>
         <div className="witness-head">
           <div>
-            <h3>{title}</h3>
+            <h3>
+              {title}
+              {sourceLabel && <span className="tag ref"> {sourceLabel}</span>}
+            </h3>
             <p className="muted">{subtitle}</p>
           </div>
           <button className="btn" onClick={onClose}>关闭 ✕</button>

@@ -20,6 +20,20 @@ export interface TimedEvent {
 }
 
 /**
+ * 候选延迟档位：原区间被怀疑抄错时，可从预录档位中择一替换。
+ * 每档在所属观测内有唯一编号，代价为 1..1_000_000 的整数。
+ * 原区间始终作为零代价档位参与枚举，无需在此声明。
+ */
+export interface DelayCandidate {
+  /** 观测内唯一编号（非空字符串） */
+  id: string;
+  minDelay: number;
+  maxDelay: number;
+  /** 校正代价：1 到 1_000_000 的整数 */
+  cost: number;
+}
+
+/**
  * 观测：连接两台不同记录器的发送事件与接收事件。
  * 真实接收时刻 − 真实发送时刻 ∈ [minDelay, maxDelay]（非负整数闭区间）。
  */
@@ -29,6 +43,8 @@ export interface Observation {
   receiveEvent: string;
   minDelay: number;
   maxDelay: number;
+  /** 预录候选档位：至多 3 个；省略表示该观测不参与校正 */
+  candidates?: DelayCandidate[];
 }
 
 export interface AuditModel {
@@ -129,3 +145,49 @@ export type Verdict =
       status: 'infeasible';
       chain: ConstraintChain;
     };
+
+/** 一条观测的档位选择（校正方案中的单条改动） */
+export interface CandidateSelection {
+  /** 观测在模型 observations 数组中的索引 */
+  observationIndex: number;
+  observationId: string;
+  /** 选中的候选档位编号 */
+  candidateId: string;
+  /** 改动前（原）区间 */
+  beforeMinDelay: number;
+  beforeMaxDelay: number;
+  /** 改动后（候选）区间 */
+  afterMinDelay: number;
+  afterMaxDelay: number;
+  cost: number;
+}
+
+/** 校正后恢复可行时的完整结果 */
+export interface CorrectionSolution {
+  /** 按观测索引升序的改动列表 */
+  changes: CandidateSelection[];
+  totalCost: number;
+  changedCount: number;
+  /** 字典序比较用的 (观测索引, 档位编号) 列表（已按观测索引升序） */
+  key: { observationIndex: number; candidateId: string }[];
+  /** 校正后模型上重新求解得到的裁决（unique/multiple），含紧确范围与端点见证 */
+  restored: Extract<Verdict, { status: 'unique' | 'multiple' }>;
+  /** 分支限界中做过可行性评估的组合（搜索节点）数 */
+  evaluatedCombinations: number;
+  /**
+   * 参与三级择优比较的可行组合数。严格劣化的可行超集（代价与改动数同时更大，
+   * 恒不可能最优）与不可破负环分支被完备剪枝，不计入；剪枝不影响最优性。
+   */
+  feasibleCombinations: number;
+}
+
+/**
+ * 校正求解结果：
+ *  - found   ：找到全局最优可行校正方案
+ *  - noscheme：所有候选组合均不可行（保留原闭合矛盾链）
+ *  - notrigged：原裁决本身可行 / 无候选观测，未发起校正
+ */
+export type CorrectionOutcome =
+  | { kind: 'found'; solution: CorrectionSolution }
+  | { kind: 'noscheme'; chain: ConstraintChain; evaluatedCombinations: number; feasibleCombinations: number }
+  | { kind: 'nottriggered' };

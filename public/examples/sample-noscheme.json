@@ -1,0 +1,28 @@
+{
+  "recorders": [
+    { "id": "R0", "minOffset": 0, "maxOffset": 0, "reference": true },
+    { "id": "R1", "minOffset": -1000, "maxOffset": 1000 },
+    { "id": "R2", "minOffset": -1000, "maxOffset": 1000 }
+  ],
+  "events": [
+    { "id": "a", "recorder": "R0", "localTime": 0 },
+    { "id": "b", "recorder": "R1", "localTime": 0 },
+    { "id": "c", "recorder": "R2", "localTime": 0 },
+    { "id": "a2", "recorder": "R0", "localTime": 10 }
+  ],
+  "observations": [
+    { "id": "o1", "sendEvent": "a", "receiveEvent": "b", "minDelay": 0, "maxDelay": 0 },
+    { "id": "o2", "sendEvent": "b", "receiveEvent": "c", "minDelay": 0, "maxDelay": 0 },
+    {
+      "id": "o3",
+      "sendEvent": "c",
+      "receiveEvent": "a2",
+      "minDelay": 0,
+      "maxDelay": 0,
+      "candidates": [
+        { "id": "c5", "minDelay": 0, "maxDelay": 5, "cost": 1 },
+        { "id": "c3", "minDelay": 1, "maxDelay": 3, "cost": 2 }
+      ]
+    }
+  ]
+}

@@ -7,6 +7,7 @@
  */
 import { validateModel } from '../src/lib/validation.ts';
 import { audit } from '../src/lib/solver.ts';
+import { solveCorrection } from '../src/lib/correction.ts';
 
 const BASE = (process.env.BASE_URL ?? 'http://web:80').replace(/\/$/, '');
 
@@ -87,6 +88,42 @@ async function main() {
         `sum=${v.chain.totalWeight}`,
       );
       check('链至少含 2 条边', v.chain.edges.length >= 2, `n=${v.chain.edges.length}`);
+    }
+    // 旧模型（无候选档位）保持原裁决：不发起校正
+    check('旧不可行模型不发起校正', solveCorrection(infeasible.model).kind === 'nottriggered');
+  }
+
+  // 档位校正示例：经 HTTP 取件并用同一套代码复算全局最优校正
+  const correctionRes = await get('/examples/sample-correction.json');
+  check('校正示例经 HTTP 可取', correctionRes.status === 200);
+  const correction = validateModel(await correctionRes.json());
+  check('校正示例校验通过', correction.issues.every((i) => i.level !== 'error'));
+  if (correction.model) {
+    check('校正示例原裁决为 infeasible', audit(correction.model).verdict.status === 'infeasible');
+    const c = solveCorrection(correction.model);
+    check('校正结果为 found', c.kind === 'found', `kind=${c.kind}`);
+    if (c.kind === 'found') {
+      check('最优总代价为 2（取 o1 的 widen 档）', c.solution.totalCost === 2, `cost=${c.solution.totalCost}`);
+      check('被改观测数为 1', c.solution.changedCount === 1, `count=${c.solution.changedCount}`);
+      check('恢复后裁决可行（唯一解或多解）', c.solution.restored.status === 'unique' || c.solution.restored.status === 'multiple');
+      check(
+        '恢复后端点见证每条观测延迟均在界内',
+        c.solution.restored.allMinWitness.observationDelays.every((d) => d.feasible) &&
+          c.solution.restored.allMaxWitness.observationDelays.every((d) => d.feasible),
+      );
+    }
+  }
+
+  // 无方案示例：所有候选组合都不可行，保留原负链
+  const noschemeRes = await get('/examples/sample-noscheme.json');
+  check('无方案示例经 HTTP 可取', noschemeRes.status === 200);
+  const noscheme = validateModel(await noschemeRes.json());
+  if (noscheme.model) {
+    const c = solveCorrection(noscheme.model);
+    check('无方案示例结果为 noscheme', c.kind === 'noscheme', `kind=${c.kind}`);
+    if (c.kind === 'noscheme') {
+      check('可行组合数为 0', c.feasibleCombinations === 0, `feasible=${c.feasibleCombinations}`);
+      check('保留的负链总和严格小于零', c.chain.totalWeight < 0, `sum=${c.chain.totalWeight}`);
     }
   }
 

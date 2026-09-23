@@ -25,6 +25,9 @@ import type {
  * xMax[i] = dist[G][i] 是全体最大值同时达到的完整可行赋值（三角不等式保证）。
  */
 
+/** 观测索引 -> 覆盖后的延迟区间（校正求解时用候选档位替换原区间） */
+export type DelayOverrides = ReadonlyMap<number, { minDelay: number; maxDelay: number }>;
+
 export interface SolveArtifacts {
   verdict: Verdict;
   /** 节点编号 -> 记录器 id；最后一个为地面节点 */
@@ -36,13 +39,16 @@ export interface SolveArtifacts {
 const nodeName = (recorderIds: string[], ground: number, node: number): string =>
   node === ground ? '0（地面常量）' : `偏移[${recorderIds[node]}]`;
 
-export function audit(model: NormalizedModel): SolveArtifacts {
+/**
+ * 构造全部差分约束边。overrides 给出被候选档位替换的观测区间；
+ * 边的 witness/sourcePath 仍指向原观测，便于审计溯源。
+ */
+export function buildEdges(model: NormalizedModel, overrides?: DelayOverrides): ConstraintEdge[] {
   const { recorders, events, observations } = model;
   const n = recorders.length;
   const ground = n;
-  const N = n + 1;
   const recorderIds = recorders.map((r) => r.id);
-  const indexById = new Map(recorders.map((r, i) => [r.id, i]));
+  const indexById = new Map(recorderIds.map((id, i) => [id, i]));
   const eventById = new Map(events.map((e) => [e.id, e]));
   const edges: ConstraintEdge[] = [];
 
@@ -64,8 +70,12 @@ export function audit(model: NormalizedModel): SolveArtifacts {
     });
   });
 
-  // 观测延迟
+  // 观测延迟（区间可能被候选档位覆盖）
   observations.forEach((o, oi) => {
+    const ov = overrides?.get(oi);
+    const dmin = ov ? ov.minDelay : o.minDelay;
+    const dmax = ov ? ov.maxDelay : o.maxDelay;
+    const corrected = ov !== undefined;
     const se = eventById.get(o.sendEvent)!;
     const re = eventById.get(o.receiveEvent)!;
     const s = indexById.get(se.recorder)!;
@@ -75,28 +85,32 @@ export function audit(model: NormalizedModel): SolveArtifacts {
     edges.push({
       from: s,
       to: r,
-      weight: ts - tr + o.maxDelay,
+      weight: ts - tr + dmax,
       witness:
-        `偏移[${re.recorder}] - 偏移[${se.recorder}] ≤ ${ts - tr + o.maxDelay}` +
-        `（观测 "${o.id}" 延迟上界 ${o.maxDelay}）`,
+        `偏移[${re.recorder}] - 偏移[${se.recorder}] ≤ ${ts - tr + dmax}` +
+        `（观测 "${o.id}" 延迟上界 ${dmax}${corrected ? '，候选档位' : ''}）`,
       sourcePath: `observations[${oi}].maxDelay`,
     });
     edges.push({
       from: r,
       to: s,
-      weight: tr - ts - o.minDelay,
+      weight: tr - ts - dmin,
       witness:
-        `偏移[${se.recorder}] - 偏移[${re.recorder}] ≤ ${tr - ts - o.minDelay}` +
-        `（观测 "${o.id}" 延迟下界 ${o.minDelay}）`,
+        `偏移[${se.recorder}] - 偏移[${re.recorder}] ≤ ${tr - ts - dmin}` +
+        `（观测 "${o.id}" 延迟下界 ${dmin}${corrected ? '，候选档位' : ''}）`,
       sourcePath: `observations[${oi}].minDelay`,
     });
   });
 
-  // Floyd–Warshall
+  return edges;
+}
+
+/** Floyd–Warshall 全源最短路，返回距离矩阵（INF 表示不可达） */
+export function floyd(edges: ConstraintEdge[], N: number): number[][] {
   const INF = Number.POSITIVE_INFINITY;
   const dist: number[][] = Array.from({ length: N }, () => new Array<number>(N).fill(INF));
   for (let i = 0; i < N; i++) dist[i][i] = 0;
-  // 记录最短路上的边，供需要时溯源（Floyd 本身不重建路径，负环用 BF 提取）
+  // 平行边只保留最紧者
   for (const e of edges) {
     if (e.weight < dist[e.from][e.to]) dist[e.from][e.to] = e.weight;
   }
@@ -112,6 +126,27 @@ export function audit(model: NormalizedModel): SolveArtifacts {
       }
     }
   }
+  return dist;
+}
+
+export function audit(model: NormalizedModel): SolveArtifacts {
+  return auditWithOverrides(model, undefined);
+}
+
+export function auditWithOverrides(
+  model: NormalizedModel,
+  overrides: DelayOverrides | undefined,
+): SolveArtifacts {
+  const { recorders, events, observations } = model;
+  const n = recorders.length;
+  const ground = n;
+  const N = n + 1;
+  const recorderIds = recorders.map((r) => r.id);
+  const indexById = new Map(recorderIds.map((id, i) => [id, i]));
+  const eventById = new Map(events.map((e) => [e.id, e]));
+  const edges = buildEdges(model, overrides);
+
+  const dist = floyd(edges, N);
 
   let negNode = -1;
   for (let i = 0; i < N; i++) {
@@ -145,31 +180,40 @@ export function audit(model: NormalizedModel): SolveArtifacts {
     reference: r.reference === true,
   }));
 
+  const effRange = (oi: number) => {
+    const ov = overrides?.get(oi);
+    const o = observations[oi];
+    return ov
+      ? { minDelay: ov.minDelay, maxDelay: ov.maxDelay }
+      : { minDelay: o.minDelay, maxDelay: o.maxDelay };
+  };
+
   const makeWitness = (endpoint: 'min' | 'max', x: number[]): EndpointWitness => {
     const offsets: Record<string, number> = {};
     recorders.forEach((r, i) => {
       offsets[r.id] = x[i];
     });
-    const observationDelays = observations.map((o) => {
+    const observationDelays = observations.map((o, oi) => {
       const se = eventById.get(o.sendEvent)!;
       const re = eventById.get(o.receiveEvent)!;
       const sendTrue = se.localTime + x[indexById.get(se.recorder)!];
       const receiveTrue = re.localTime + x[indexById.get(re.recorder)!];
       const actualDelay = receiveTrue - sendTrue;
+      const er = effRange(oi);
       return {
         observationId: o.id,
         sendEvent: o.sendEvent,
         receiveEvent: o.receiveEvent,
         sender: se.recorder,
         receiver: re.recorder,
-        minDelay: o.minDelay,
-        maxDelay: o.maxDelay,
+        minDelay: er.minDelay,
+        maxDelay: er.maxDelay,
         sendLocal: se.localTime,
         receiveLocal: re.localTime,
         sendTrue,
         receiveTrue,
         actualDelay,
-        feasible: actualDelay >= o.minDelay && actualDelay <= o.maxDelay,
+        feasible: actualDelay >= er.minDelay && actualDelay <= er.maxDelay,
       };
     });
     return {
