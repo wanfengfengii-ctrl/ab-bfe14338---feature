@@ -1,0 +1,16 @@
+{
+  "recorders": [
+    { "id": "R0", "minOffset": 0, "maxOffset": 0, "reference": true },
+    { "id": "R1", "minOffset": 0, "maxOffset": 10 }
+  ],
+  "events": [
+    { "id": "e0", "recorder": "R0", "localTime": 100 },
+    { "id": "e1", "recorder": "R1", "localTime": 105 },
+    { "id": "e2", "recorder": "R1", "localTime": 200 },
+    { "id": "e3", "recorder": "R0", "localTime": 190 }
+  ],
+  "observations": [
+    { "id": "o-fwd", "sendEvent": "e0", "receiveEvent": "e1", "minDelay": 10, "maxDelay": 10 },
+    { "id": "o-bwd", "sendEvent": "e2", "receiveEvent": "e3", "minDelay": 0, "maxDelay": 0 }
+  ]
+}
