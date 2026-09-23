@@ -144,7 +144,12 @@ body {
 }
 .grid th { background: var(--panel-2); color: var(--muted); font-weight: 600; }
 .grid tr.bad-row td { background: rgba(255, 107, 107, 0.10); }
+.grid tr.good-row td { background: rgba(46, 204, 143, 0.10); }
 .grid tr.focus-row td { background: rgba(91, 157, 255, 0.14); }
+
+.correction { margin: 10px 0; }
+.correction details summary { cursor: pointer; }
+.correction tfoot td { font-size: 12px; }
 
 .tag {
   display: inline-block;

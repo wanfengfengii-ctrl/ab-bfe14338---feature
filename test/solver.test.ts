@@ -242,3 +242,221 @@ test('JSON 语法错误转为定位问题', () => {
   assert.equal(r.issues[0].path, '$');
   assert.ok(/JSON 语法错误/.test(r.issues[0].message));
 });
+
+/* ----------------------- 候选档位校正 ----------------------- */
+
+test('旧模型（未声明候选档位）不可行时不发起校正', () => {
+  const raw = JSON.parse(readFileSync(join(examples, 'sample-infeasible.json'), 'utf8'));
+  const model = mustValidate(raw);
+  const { verdict } = audit(model);
+  assert.equal(verdict.status, 'infeasible');
+  if (verdict.status !== 'infeasible') return;
+  assert.equal(verdict.correction, undefined);
+});
+
+test('校正示例：完整枚举后按 代价→改动数→台账 取得全局最优', () => {
+  const raw = JSON.parse(readFileSync(join(examples, 'sample-correction.json'), 'utf8'));
+  const model = mustValidate(raw);
+  const { verdict } = audit(model);
+  assert.equal(verdict.status, 'infeasible');
+  if (verdict.status !== 'infeasible') return;
+  const c = verdict.correction;
+  assert.ok(c, '声明了候选档位且不可行时必须发起校正');
+  assert.equal(c!.status, 'repaired');
+  if (c!.status !== 'repaired') return;
+
+  const p = c.plan;
+  // 2 条候选观测 ×（原档 + 2 候选）= 9 个组合
+  assert.equal(p.stats.totalCombinations, 9);
+  // [lo,原] 与 [原,wide] 为代价 5 的可行组合并到达叶子；[mid,mid] 同样代价 5
+  // 但改动 2 条，在它被枚举前已被目标界剪枝（不可能更优，无需到达叶子）
+  assert.ok(p.stats.feasibleCombinations >= 2, `feasible=${p.stats.feasibleCombinations}`);
+  assert.ok(p.stats.prunedBound >= 1, '应发生目标界剪枝');
+  assert.ok(p.stats.visitedNodes <= p.stats.totalCombinations * 2);
+  // 三档代价目标：5（1 改）最优于 5（2 改）与 7
+  assert.equal(p.totalCost, 5);
+  assert.equal(p.changedCount, 1);
+  assert.equal(p.changes.length, 1);
+  assert.deepEqual(p.changeKey, [{ observationIndex: 0, tierId: 'lo' }]);
+  assert.equal(p.changes[0].beforeMinDelay, 2);
+  assert.equal(p.changes[0].beforeMaxDelay, 2);
+  assert.equal(p.changes[0].afterMinDelay, 0);
+  assert.equal(p.changes[0].afterMaxDelay, 5);
+  assert.equal(p.changes[0].cost, 5);
+  // 完整台账含保持原档的观测（o2 原档）
+  assert.equal(p.selections.length, 2);
+  const sel1 = p.selections.find((s) => s.observationIndex === 1)!;
+  assert.equal(sel1.candidate, false);
+  assert.equal(sel1.cost, 0);
+
+  // 恢复后的紧确范围与端点见证：o2 原档把 x1 钉为 5，o1 校正为 [0,5] 后
+  // 延迟恰为上界 5，故 R1 唯一可行偏移为 5；R2 由宽松固定观测给出非单点范围
+  const cv = p.correctedVerdict;
+  assert.notEqual(cv.status, 'infeasible');
+  if (cv.status === 'infeasible') return;
+  const r1 = cv.ranges.find((r) => r.recorderId === 'R1')!;
+  assert.deepEqual([r1.min, r1.max], [5, 5]);
+  const r2 = cv.ranges.find((r) => r.recorderId === 'R2')!;
+  assert.deepEqual([r2.min, r2.max], [-3, 100], 'R2 紧确界：max(3+x2∈[0,1000]) ∩ [-100,100]');
+  assert.equal(cv.status, 'multiple');
+  for (const d of cv.allMinWitness.observationDelays) {
+    assert.ok(d.feasible, `${d.observationId} 最小见证应落在校正后区间内：实际 ${d.actualDelay}`);
+  }
+  for (const d of cv.allMaxWitness.observationDelays) {
+    assert.ok(d.feasible, `${d.observationId} 最大见证应落在校正后区间内：实际 ${d.actualDelay}`);
+  }
+  // o1 见证使用校正后区间 [0,5]
+  const wO1 = cv.allMinWitness.observationDelays.find((d) => d.observationId === 'o1')!;
+  assert.equal(wO1.minDelay, 0);
+  assert.equal(wO1.maxDelay, 5);
+});
+
+test('无方案：所有档位组合都不可行时明确 no-plan 并保留矛盾链', () => {
+  // 发送/接收本地时标相差 2e9，即便采用最大允许延迟 1e9，xB 仍须 ≤ -1e9，
+  // 与偏移下界 -5 冲突；任何候选档位都无法恢复。
+  const model = mustValidate({
+    recorders: [
+      { id: 'A', minOffset: 0, maxOffset: 0, reference: true },
+      { id: 'B', minOffset: -5, maxOffset: 5 },
+    ],
+    events: [
+      { id: 'a', recorder: 'A', localTime: -1_000_000_000 },
+      { id: 'b', recorder: 'B', localTime: 1_000_000_000 },
+    ],
+    observations: [
+      {
+        id: 'o', sendEvent: 'a', receiveEvent: 'b', minDelay: 0, maxDelay: 0,
+        candidates: [{ id: 'wide', minDelay: 0, maxDelay: 1_000_000_000, cost: 1 }],
+      },
+    ],
+  });
+  const { verdict } = audit(model);
+  assert.equal(verdict.status, 'infeasible');
+  if (verdict.status !== 'infeasible') return;
+  assert.ok(verdict.chain.totalWeight < 0, '原闭合矛盾链必须保留');
+  assert.equal(verdict.correction?.status, 'no-plan');
+  if (verdict.correction?.status !== 'no-plan') return;
+  assert.equal(verdict.correction.stats.totalCombinations, 2);
+  assert.equal(verdict.correction.stats.feasibleCombinations, 0);
+});
+
+test('可行模型即便声明候选档位也不发起校正', () => {
+  const model = mustValidate({
+    recorders: [
+      { id: 'A', minOffset: 0, maxOffset: 0, reference: true },
+      { id: 'B', minOffset: -100, maxOffset: 100 },
+    ],
+    events: [
+      { id: 's', recorder: 'A', localTime: 0 },
+      { id: 'r', recorder: 'B', localTime: 7 },
+    ],
+    observations: [
+      {
+        id: 'o', sendEvent: 's', receiveEvent: 'r', minDelay: 3, maxDelay: 3,
+        candidates: [{ id: 'wide', minDelay: 0, maxDelay: 10, cost: 1 }],
+      },
+    ],
+  });
+  const { verdict } = audit(model);
+  assert.notEqual(verdict.status, 'infeasible');
+});
+
+test('校正全局最优而非首个可行/逐条贪心：代价与改动数决胜', () => {
+  // 两观测各自单改即可恢复；首个可行（按观测顺序）在 obs0，但 obs1 的改法代价更低
+  const model = mustValidate({
+    recorders: [
+      { id: 'A', minOffset: 0, maxOffset: 0, reference: true },
+      { id: 'B', minOffset: -5, maxOffset: 5 },
+    ],
+    events: [
+      { id: 'a1', recorder: 'A', localTime: 0 },
+      { id: 'b1', recorder: 'B', localTime: 0 },
+      { id: 'b2', recorder: 'B', localTime: 5 },
+      { id: 'a2', recorder: 'A', localTime: 10 },
+    ],
+    observations: [
+      {
+        id: 'o1', sendEvent: 'a1', receiveEvent: 'b1', minDelay: 2, maxDelay: 2,
+        candidates: [{ id: 'fix', minDelay: 0, maxDelay: 5, cost: 9 }],
+      },
+      {
+        id: 'o2', sendEvent: 'b2', receiveEvent: 'a2', minDelay: 0, maxDelay: 0,
+        candidates: [{ id: 'fix', minDelay: 0, maxDelay: 3, cost: 2 }],
+      },
+    ],
+  });
+  const { verdict } = audit(model);
+  assert.equal(verdict.status, 'infeasible');
+  if (verdict.status !== 'infeasible') return;
+  assert.equal(verdict.correction?.status, 'repaired');
+  if (verdict.correction?.status !== 'repaired') return;
+  const p = verdict.correction.plan;
+  assert.equal(p.totalCost, 2, '必须选取代价更低的 o2 修法，而非首个可行的 o1');
+  assert.equal(p.changedCount, 1);
+  assert.deepEqual(p.changeKey, [{ observationIndex: 1, tierId: 'fix' }]);
+});
+
+test('校验：候选档位数量/编号/代价/区间非法全部精确定位', () => {
+  const r = validateModel({
+    recorders: [
+      { id: 'A', minOffset: 0, maxOffset: 0, reference: true },
+      { id: 'B', minOffset: -10, maxOffset: 10 },
+    ],
+    events: [
+      { id: 's', recorder: 'A', localTime: 0 },
+      { id: 'r', recorder: 'B', localTime: 1 },
+    ],
+    observations: [
+      {
+        id: 'o1', sendEvent: 's', receiveEvent: 'r', minDelay: 0, maxDelay: 0,
+        candidates: [],
+      },
+      {
+        id: 'o2', sendEvent: 's', receiveEvent: 'r', minDelay: 0, maxDelay: 0,
+        candidates: [
+          { id: 'x', minDelay: 0, maxDelay: 0, cost: 0 },
+          { id: 'x', minDelay: 5, maxDelay: 1, cost: 1000001 },
+        ],
+      },
+      {
+        id: 'o3', sendEvent: 's', receiveEvent: 'r', minDelay: 0, maxDelay: 0,
+        candidates: [{ id: 'y', minDelay: -1, maxDelay: 0, cost: 1 }],
+      },
+    ],
+  });
+  const paths = r.issues.filter((i) => i.level === 'error').map((i) => i.path);
+  for (const p of [
+    'observations[0].candidates',
+    'observations[1].candidates[0].cost',
+    'observations[1].candidates[1].id',
+    'observations[1].candidates[1].minDelay',
+    'observations[1].candidates[1].cost',
+    'observations[2].candidates[0].minDelay',
+  ]) {
+    assert.ok(paths.includes(p), `缺少定位 ${p}；实际：${JSON.stringify(paths)}`);
+  }
+  assert.ok(!r.model);
+});
+
+test('校验：超过 18 条观测附加候选档位被拒', () => {
+  const recorders = [
+    { id: 'A', minOffset: 0, maxOffset: 0, reference: true },
+    { id: 'B', minOffset: -100, maxOffset: 100 },
+  ];
+  const events = [
+    { id: 's', recorder: 'A', localTime: 0 },
+    { id: 'r', recorder: 'B', localTime: 1 },
+  ];
+  const observations = [];
+  for (let i = 0; i < 19; i++) {
+    observations.push({
+      id: `o${i}`, sendEvent: 's', receiveEvent: 'r', minDelay: 0, maxDelay: 0,
+      candidates: [{ id: 'c', minDelay: 0, maxDelay: 10, cost: 1 }],
+    });
+  }
+  const r = validateModel({ recorders, events, observations });
+  assert.ok(
+    r.issues.some((i) => /observations\[18\]\.candidates/.test(i.path) && /18/.test(i.message)),
+    JSON.stringify(r.issues),
+  );
+});

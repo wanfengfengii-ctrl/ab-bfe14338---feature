@@ -87,6 +87,45 @@ async function main() {
         `sum=${v.chain.totalWeight}`,
       );
       check('链至少含 2 条边', v.chain.edges.length >= 2, `n=${v.chain.edges.length}`);
+      check(
+        '未声明候选档位的旧模型不发起校正（correction 缺省）',
+        v.correction === undefined,
+      );
+    }
+  }
+
+  const correctionRes = await get('/examples/sample-correction.json');
+  check('档位校正示例经 HTTP 可取', correctionRes.status === 200);
+  const correction = validateModel(await correctionRes.json());
+  check('档位校正示例校验通过', correction.issues.every((i) => i.level !== 'error'));
+  if (correction.model) {
+    const v = audit(correction.model).verdict;
+    check('档位校正示例原裁决为 infeasible', v.status === 'infeasible', `status=${v.status}`);
+    if (v.status === 'infeasible') {
+      check('原闭合矛盾链保留', v.chain.totalWeight < 0, `sum=${v.chain.totalWeight}`);
+      const c = v.correction;
+      check('已发起校正枚举', c !== undefined);
+      check('校正恢复全局一致性', c?.status === 'repaired');
+      if (c?.status === 'repaired') {
+        const p = c.plan;
+        check('最优总代价为 5', p.totalCost === 5, `cost=${p.totalCost}`);
+        check('最少改动 1 条观测', p.changedCount === 1, `n=${p.changedCount}`);
+        check(
+          '台账决胜选择 observations[0] 的 lo 档',
+          p.changes.length === 1 &&
+            p.changes[0].observationIndex === 0 &&
+            p.changes[0].tierId === 'lo',
+          JSON.stringify(p.changeKey),
+        );
+        check('完整枚举 9 个组合', p.stats.totalCombinations === 9, `combos=${p.stats.totalCombinations}`);
+        check('可行组合计数大于 0', p.stats.feasibleCombinations > 0);
+        check(
+          '恢复后裁决可行且见证逐条满足',
+          p.correctedVerdict.status !== 'infeasible' &&
+            p.correctedVerdict.allMinWitness.observationDelays.every((d) => d.feasible) &&
+            p.correctedVerdict.allMaxWitness.observationDelays.every((d) => d.feasible),
+        );
+      }
     }
   }
 

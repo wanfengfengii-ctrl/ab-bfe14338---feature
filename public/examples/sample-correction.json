@@ -1,0 +1,45 @@
+{
+  "recorders": [
+    { "id": "R0", "minOffset": 0, "maxOffset": 0, "reference": true },
+    { "id": "R1", "minOffset": -5, "maxOffset": 5 },
+    { "id": "R2", "minOffset": -100, "maxOffset": 100 }
+  ],
+  "events": [
+    { "id": "a1", "recorder": "R0", "localTime": 0 },
+    { "id": "b1", "recorder": "R1", "localTime": 0 },
+    { "id": "b2", "recorder": "R1", "localTime": 5 },
+    { "id": "a2", "recorder": "R0", "localTime": 10 },
+    { "id": "c1", "recorder": "R2", "localTime": 3 }
+  ],
+  "observations": [
+    {
+      "id": "o1",
+      "sendEvent": "a1",
+      "receiveEvent": "b1",
+      "minDelay": 2,
+      "maxDelay": 2,
+      "candidates": [
+        { "id": "lo", "minDelay": 0, "maxDelay": 5, "cost": 5 },
+        { "id": "mid", "minDelay": 2, "maxDelay": 4, "cost": 3 }
+      ]
+    },
+    {
+      "id": "o2",
+      "sendEvent": "b2",
+      "receiveEvent": "a2",
+      "minDelay": 0,
+      "maxDelay": 0,
+      "candidates": [
+        { "id": "wide", "minDelay": 0, "maxDelay": 3, "cost": 5 },
+        { "id": "mid", "minDelay": 0, "maxDelay": 2, "cost": 2 }
+      ]
+    },
+    {
+      "id": "o3",
+      "sendEvent": "a1",
+      "receiveEvent": "c1",
+      "minDelay": 0,
+      "maxDelay": 1000
+    }
+  ]
+}

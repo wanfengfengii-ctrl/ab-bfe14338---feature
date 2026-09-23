@@ -4,6 +4,8 @@ import { parseModelText, validateModel } from './lib/validation';
 import { audit } from './lib/solver';
 import type {
   ConstraintChain,
+  CorrectionPlan,
+  CorrectionSearchStats,
   EndpointWitness,
   Issue,
   NormalizedModel,
@@ -108,6 +110,9 @@ export function App() {
               </button>
               <button className="btn" onClick={() => void loadExample('sample-infeasible.json')}>
                 示例：不可行
+              </button>
+              <button className="btn" onClick={() => void loadExample('sample-correction.json')}>
+                示例：档位校正
               </button>
               <button className="btn ghost" onClick={clearAll}>清空</button>
             </div>
@@ -303,7 +308,203 @@ function VerdictBody({
         </>
       )}
 
-      {verdict.status === 'infeasible' && <ChainView chain={verdict.chain} />}
+      {verdict.status === 'infeasible' && (
+        <>
+          {verdict.correction !== undefined && (
+            <CorrectionPanel
+              correction={verdict.correction}
+              onOpen={onOpen}
+            />
+          )}
+          <ChainView chain={verdict.chain} />
+        </>
+      )}
+    </div>
+  );
+}
+
+function SearchStatsView({ stats }: { stats: CorrectionSearchStats }) {
+  return (
+    <p className="muted small">
+      全局精确枚举（非逐条贪心、非首个可行即止）：参与观测 {stats.eligibleObservations} 条 ·
+      组合空间 {fmt(stats.totalCombinations)} 个 · 访问节点 {fmt(stats.visitedNodes)} ·
+      到达叶子 {fmt(stats.evaluatedLeaves)}（其中可行 {fmt(stats.feasibleCombinations)}）·
+      部分矛盾剪枝 {fmt(stats.prunedInfeasible)} · 目标界剪枝 {fmt(stats.prunedBound)}。
+      所有未到达叶子的组合均经证明不可能更优，故最优组合完整可比。
+    </p>
+  );
+}
+
+function CorrectionPanel({
+  correction,
+  onOpen,
+}: {
+  correction: NonNullable<Extract<Verdict, { status: 'infeasible' }>['correction']>;
+  onOpen: (w: EndpointWitness, r: RecorderRange[], id: string) => void;
+}) {
+  if (correction.status === 'no-plan') {
+    return (
+      <div className="correction">
+        <Banner kind="bad" title="校正复核：无方案">
+          已在 {fmt(correction.stats.totalCombinations)} 个候选档位组合上完整比较，
+          没有任何组合能恢复全局一致性；原裁决保持不可行，下方闭合矛盾链原样保留。
+        </Banner>
+        <SearchStatsView stats={correction.stats} />
+      </div>
+    );
+  }
+
+  if (correction.status === 'limit') {
+    return (
+      <div className="correction">
+        <Banner kind="mid" title="校正复核：枚举超限">
+          候选档位组合空间为 {fmt(correction.stats.totalCombinations)}，
+          完整精确枚举超出节点预算（{fmt(correction.stats.visitedNodes)}），
+          本次不给出方案以避免以部分搜索冒称全局最优；原闭合矛盾链保留于下方。
+        </Banner>
+        <SearchStatsView stats={correction.stats} />
+      </div>
+    );
+  }
+
+  const plan: CorrectionPlan = correction.plan;
+  const cv = plan.correctedVerdict;
+  if (cv.status === 'infeasible') return null; // 理论不可达：校正方案必可行
+
+  return (
+    <div className="correction">
+      <Banner kind="good" title="校正复核：已恢复全局一致性">
+        原裁决不可行；对候选档位的全部组合完整比较后，取得字典序最优校正方案：
+        总代价 <strong>{fmt(plan.totalCost)}</strong>，改动观测 <strong>{plan.changedCount}</strong> 条
+        （优先级：总代价 → 被改观测数 → 改动项 [观测索引, 档位编号] 台账）。
+      </Banner>
+      <SearchStatsView stats={plan.stats} />
+
+      <div className="pane-head compact">
+        <h3>改动明细（{plan.changes.length} 条，按观测索引升序）</h3>
+      </div>
+      <div className="table-wrap">
+        <table className="grid">
+          <thead>
+            <tr>
+              <th>观测索引</th>
+              <th>观测</th>
+              <th>改动前区间</th>
+              <th>档位编号</th>
+              <th>改动后区间</th>
+              <th>代价</th>
+            </tr>
+          </thead>
+          <tbody>
+            {plan.changes.map((c) => (
+              <tr key={c.observationIndex}>
+                <td className="mono">{c.observationIndex}</td>
+                <td>{c.observationId}</td>
+                <td className="mono">[{fmt(c.beforeMinDelay)}, {fmt(c.beforeMaxDelay)}]</td>
+                <td className="mono strong">{c.tierId}</td>
+                <td className="mono">[{fmt(c.afterMinDelay)}, {fmt(c.afterMaxDelay)}]</td>
+                <td className="mono">{fmt(c.cost)}</td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr className="good-row">
+              <td colSpan={5}>总代价（改动台账：{plan.changeKey
+                .map((k) => `[${k.observationIndex}, ${k.tierId}]`)
+                .join('，') || '无'}）</td>
+              <td className="mono strong">{fmt(plan.totalCost)}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      <details className="selections">
+        <summary className="muted small">
+          完整档位选择台账（{plan.selections.length} 条候选观测，含保持原档者）
+        </summary>
+        <div className="table-wrap">
+          <table className="grid">
+            <thead>
+              <tr><th>观测索引</th><th>观测</th><th>采用档位</th><th>区间</th><th>代价</th></tr>
+            </thead>
+            <tbody>
+              {plan.selections.map((s) => (
+                <tr key={s.observationIndex} className={s.candidate ? 'good-row' : ''}>
+                  <td className="mono">{s.observationIndex}</td>
+                  <td>{s.observationId}</td>
+                  <td className="mono">{s.candidate ? s.tierId : '（原档 · 零代价）'}</td>
+                  <td className="mono">[{fmt(s.afterMinDelay)}, {fmt(s.afterMaxDelay)}]</td>
+                  <td className="mono">{fmt(s.cost)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </details>
+
+      <div className="pane-head compact">
+        <h3>恢复后的紧确偏移区间（点选端点查看完整见证）</h3>
+        <div className="actions">
+          <button
+            className="btn small"
+            onClick={() => onOpen(cv.allMinWitness, cv.ranges, cv.ranges[0].recorderId)}
+          >
+            全体最小赋值
+          </button>
+          <button
+            className="btn small"
+            onClick={() => onOpen(cv.allMaxWitness, cv.ranges, cv.ranges[0].recorderId)}
+          >
+            全体最大赋值
+          </button>
+        </div>
+      </div>
+      <div className="table-wrap">
+        <table className="grid">
+          <thead>
+            <tr>
+              <th>记录器</th>
+              <th>最小偏移</th>
+              <th>最大偏移</th>
+              <th>宽度</th>
+            </tr>
+          </thead>
+          <tbody>
+            {cv.ranges.map((r) => (
+              <tr key={r.recorderId}>
+                <td>
+                  {r.recorderId}
+                  {r.reference && <span className="tag ref">参考机</span>}
+                  {r.min === r.max && <span className="tag point">单点</span>}
+                </td>
+                <td>
+                  <button
+                    className="endpoint min-ep"
+                    title="点选查看：全体最小值完整可行赋值（校正后）"
+                    onClick={() => onOpen(cv.allMinWitness, cv.ranges, r.recorderId)}
+                  >
+                    {fmt(r.min)} ◂
+                  </button>
+                </td>
+                <td>
+                  <button
+                    className="endpoint max-ep"
+                    title="点选查看：全体最大值完整可行赋值（校正后）"
+                    onClick={() => onOpen(cv.allMaxWitness, cv.ranges, r.recorderId)}
+                  >
+                    {fmt(r.max)} ▸
+                  </button>
+                </td>
+                <td className="mono">{fmt(r.max - r.min)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="muted small">
+        端点见证使用校正后的档位区间逐项核对每条观测的实际延迟；校正后裁决状态：
+        {cv.status === 'unique' ? '唯一解。' : '多解（区间均为紧确界）。'}
+      </p>
     </div>
   );
 }

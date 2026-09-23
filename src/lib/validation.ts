@@ -1,5 +1,6 @@
 import type {
   AuditModel,
+  DelayTier,
   Issue,
   NormalizedModel,
   Observation,
@@ -8,6 +9,7 @@ import type {
 } from '../types';
 
 const LIMIT = 1_000_000_000;
+const COST_LIMIT = 1_000_000;
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -179,6 +181,7 @@ export function validateModel(raw: unknown): ValidationResult {
   // ---------- 观测 ----------
   const observations: Observation[] = [];
   const obsIds = new Set<string>();
+  let candidateBearingCount = 0;
   if (data.observations !== undefined && !Array.isArray(data.observations)) {
     error('observations', '必须是数组');
   }
@@ -229,6 +232,71 @@ export function validateModel(raw: unknown): ValidationResult {
       error(`${p}.minDelay`, '延迟下界不能大于上界');
     }
 
+    // ---------- 预录候选延迟档位（可选；缺省即旧模型） ----------
+    let candidates: DelayTier[] | undefined;
+    if (o.candidates !== undefined) {
+      if (!Array.isArray(o.candidates)) {
+        error(`${p}.candidates`, '候选档位必须是数组');
+      } else if (o.candidates.length < 1 || o.candidates.length > 3) {
+        error(`${p}.candidates`, `每条观测至多附加 1 至 3 个候选档位（当前 ${o.candidates.length}）`);
+      } else {
+        if (candidateBearingCount >= 18) {
+          error(`${p}.candidates`, '至多 18 条观测可以附加候选档位');
+        }
+        const tiers: DelayTier[] = [];
+        const tierIds = new Set<string>();
+        let tiersOk = true;
+        o.candidates.forEach((t, ti) => {
+          const tp = `${p}.candidates[${ti}]`;
+          if (!isObject(t)) {
+            error(tp, '候选档位必须是对象');
+            tiersOk = false;
+            return;
+          }
+          let tierId = '';
+          if (!isNonEmptyString(t.id)) {
+            error(`${tp}.id`, '档位编号必须是非空字符串');
+            tiersOk = false;
+          } else if (tierIds.has(t.id as string)) {
+            error(`${tp}.id`, `档位编号在观测内重复："${t.id as string}"`);
+            tiersOk = false;
+          } else {
+            tierIds.add(t.id as string);
+            tierId = t.id as string;
+          }
+          const cminOk = isIntInRange(t.minDelay, 0, LIMIT);
+          if (!cminOk) error(`${tp}.minDelay`, `必须是 0 到 ${LIMIT} 之间的整数（延迟非负）`);
+          const cmaxOk = isIntInRange(t.maxDelay, 0, LIMIT);
+          if (!cmaxOk) error(`${tp}.maxDelay`, `必须是 0 到 ${LIMIT} 之间的整数（延迟非负）`);
+          if (cminOk && cmaxOk && (t.minDelay as number) > (t.maxDelay as number)) {
+            error(`${tp}.minDelay`, '延迟下界不能大于上界');
+          }
+          if (!isIntInRange(t.cost, 1, COST_LIMIT)) {
+            error(`${tp}.cost`, `校正代价必须是 1 到 ${COST_LIMIT} 之间的整数（原区间为零代价档位，无需列入）`);
+          }
+          if (
+            tierId !== '' &&
+            cminOk &&
+            cmaxOk &&
+            isIntInRange(t.cost, 1, COST_LIMIT)
+          ) {
+            tiers.push({
+              id: tierId,
+              minDelay: t.minDelay as number,
+              maxDelay: t.maxDelay as number,
+              cost: t.cost as number,
+            });
+          } else {
+            tiersOk = false;
+          }
+        });
+        if (tiersOk && tiers.length === o.candidates.length) {
+          candidates = tiers;
+          candidateBearingCount++;
+        }
+      }
+    }
+
     if (id && send && recv && dminOk && dmaxOk) {
       observations.push({
         id,
@@ -236,6 +304,7 @@ export function validateModel(raw: unknown): ValidationResult {
         receiveEvent: recv.id,
         minDelay: o.minDelay as number,
         maxDelay: o.maxDelay as number,
+        ...(candidates ? { candidates } : {}),
       });
     }
   });
@@ -256,7 +325,12 @@ export function validateModel(raw: unknown): ValidationResult {
   }
   return {
     issues,
-    model: { recorders, events, observations },
+    model: {
+      recorders,
+      events,
+      observations,
+      hasCandidates: candidateBearingCount > 0,
+    },
   };
 }
 
